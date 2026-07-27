@@ -317,8 +317,9 @@ def build_html(us):
   th{background:#f0f1f4;color:#374151;font-weight:600;cursor:pointer;user-select:none;position:relative}
   th.sort-asc::after{content:" ▲";font-size:10px;color:var(--brand)}
   th.sort-desc::after{content:" ▼";font-size:10px;color:var(--brand)}
-  tbody tr:nth-child(even){background:#f7f8fa}
-  tbody tr:hover{background:#e8f0fe}
+  tbody td{background:#fff}
+  tbody tr:nth-child(even) td{background:#f7f8fa}
+  tbody tr:hover td{background:#e8f0fe}
   .rk{display:inline-block;min-width:22px;text-align:center;font-weight:700;color:var(--brand2)}
   .code{color:var(--sub);font-size:12px}
   .yld{font-weight:700;color:var(--brand)}
@@ -337,6 +338,14 @@ def build_html(us):
     .tabs{gap:6px}
     .tab{padding:8px 12px;font-size:clamp(12px,3.4vw,14px)}
     .wrap{padding:12px 12px 48px}
+    /* 手机端：横向滑动时冻结「排名」与「名称」两列 */
+    .table-wrap{position:relative}
+    table{overflow:visible;border-radius:0}
+    table th:nth-child(1), table td:nth-child(1),
+    table th:nth-child(2), table td:nth-child(2){position:sticky;z-index:2;background-clip:padding-box}
+    table th:nth-child(1), table td:nth-child(1){left:0;width:46px;min-width:46px;max-width:46px}
+    table th:nth-child(2), table td:nth-child(2){left:46px;width:108px;min-width:108px;max-width:108px;white-space:normal;box-shadow:2px 0 0 rgba(15,23,42,.10)}
+    table th:nth-child(1), table th:nth-child(2){z-index:3;background:#f0f1f4}
   }
 </style>
 </head>
