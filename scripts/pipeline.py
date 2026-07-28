@@ -350,6 +350,17 @@ def build_html(us):
 </style>
 </head>
 <body>
+<!-- Vercel Web Analytics：在 Vercel 控制台开启 Analytics 后，/_vercel/insights/script.js 由 Vercel 自动提供 -->
+<script>
+(function(){
+  window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+  var va = document.createElement('script');
+  va.async = true;
+  va.src = '/_vercel/insights/script.js';
+  var s = document.getElementsByTagName('script')[0];
+  if (s) s.parentNode.insertBefore(va, s); else document.head.appendChild(va);
+})();
+</script>
 <div class="wrap">
   <header>
     <h1>美股 股息率排名</h1>
