@@ -344,7 +344,7 @@ def build_html(us):
     table th:nth-child(1), table td:nth-child(1),
     table th:nth-child(2), table td:nth-child(2){position:sticky;z-index:2;background-clip:padding-box}
     table th:nth-child(1), table td:nth-child(1){left:0;width:46px;min-width:46px;max-width:46px}
-    table th:nth-child(2), table td:nth-child(2){left:46px;width:108px;min-width:108px;max-width:108px;white-space:normal;box-shadow:2px 0 0 rgba(15,23,42,.10)}
+    table th:nth-child(2), table td:nth-child(2){left:46px;width:108px;min-width:108px;max-width:108px;white-space:normal;box-shadow:1px 0 0 var(--line)}
     table th:nth-child(1), table th:nth-child(2){z-index:3;background:#f0f1f4}
   }
 </style>
