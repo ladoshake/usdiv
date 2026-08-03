@@ -5,7 +5,7 @@
 流程：取代码宇宙 -> 批量 quote(真实市值/股息率TTM) -> 批量分红历史 -> 分市值档 Top30 -> 写 HTML
 数据来源：腾讯自选股（westock-data skill 的行情/分红接口）
 """
-import subprocess, json, re, os, sys, time, datetime
+import subprocess, json, re, os, sys, time, datetime, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 # ---------------- 环境常量（绝对路径，避免依赖环境变量） ----------------
@@ -29,27 +29,55 @@ FX = 7.8  # HKD per USD（联系汇率，仅说明用）
 TOP = 30
 
 # ---------------------------------------------------------------------
-# 美股 OTC / 粉单 剔除规则
-# 腾讯美股数据不暴露交易所/板块字段（market_type 对 OTC 与正规交易所均为 200），
-# 因此无法用字段自动区分。采用代码后缀 + 长度规律（已实测验证）：
-#   - 粉单(Pink Sheet)代码带 .PS 后缀；
-#   - OTC 外国 ADR / 外国普通股：原公司代码(通常 ≤4 字母) 加 Y(ADR) / F(普通股)
-#     后缀，使代码恰为 5 字母且以 Y/F 结尾。这是 OTC 外国证券的强信号，例如
-#     NSRGY 雀巢、TCEHY 腾讯、IDCBY 工行、ACGBF 农行、ASMLF ASML、BABAF 阿里；
-#   - 正规交易所上市的外国 ADR / 普通股代码长度一般 ≤4 字母（如 SKHY 海力士、
-#     LLY 礼来、F 福特、COF 第一资本），不会被误判；
-# 故规则：剔除 .PS 后缀，以及「长度恰为 5 且以 Y/F 结尾」的代码。
-# 若未来出现「5 字母却属正规交易所」的例外，单独加入下方 whitelist 即可。
-OTC_WHITELIST = set()  # 已知 5 字母但属正规交易所的代码（目前无）
+# 美股 OTC / 粉单 剔除规则（基于腾讯 gtimg 行情接口的「交易所后缀」编码）
+# westock-tool 返回的代码是归一化的 usXXXX，不带交易所后缀，且 market_type 对
+# OTC / 正规均为 200，无法区分。但更底层的腾讯 gtimg 接口（qt.gtimg.cn）返回的
+# 带后缀代码能直接判定上市地（已实测验证）：
+#   .OQ / .O  -> 纳斯达克 (NASDAQ)
+#   .N  / .A  -> 纽交所 (NYSE，含 NYSE American)
+#   其他(如 .PS 粉单 / .OB / .PK 等) -> OTC / 场外，应剔除
+# 例：AAPL.OQ(纳斯达克) / AZO.N(纽交所) / SKHY.OQ(海力士ADR,纳斯达克) 保留；
+#     NSRGY.PS / ACGBF.PS / TCEHY.PS(均为粉单) 剔除。
+# 故规则：调 gtimg 取后缀，后缀 ∈ {OQ,O,N,A} 保留，其余剔除。
+GTIMG_EXCHANGE_OK = {"OQ", "O", "N", "A"}  # 正规交易所后缀白名单
 
-def is_otc_pink(code):
-    """判断是否为美股粉单/OTC 标的（应被剔除）。code 形如 usXXXX。"""
-    t = code[2:] if code.startswith("us") else code
-    if ".PS" in t:                      # 粉单
+def fetch_us_suffixes(codes):
+    """批量调腾讯 gtimg 行情接口，取带交易所后缀的代码。
+    返回 {归一化code: 后缀大写}；解析失败 / 无后缀置 None。"""
+    out = {}
+    codes = list(codes)
+    for i in range(0, len(codes), 60):
+        batch = codes[i:i + 60]
+        url = "https://qt.gtimg.cn/q=" + ",".join(batch)
+        try:
+            raw = urllib.request.urlopen(url, timeout=20).read()
+            data = raw.decode("gbk", "ignore")
+        except Exception as e:
+            log(f"  gtimg batch {i} error: {e}")
+            for c in batch:
+                out[c] = None
+            continue
+        for line in data.split(";"):
+            line = line.strip()
+            if "~" not in line:
+                continue
+            p = line.split("~")
+            m = re.search(r'(us[A-Za-z0-9.]+)', p[0])
+            if not m:
+                continue
+            sym = m.group(1)
+            suffix_code = p[2] if len(p) > 2 else ""
+            suffix = suffix_code.rsplit(".", 1)[-1].upper() if "." in suffix_code else ""
+            out[sym] = suffix
+    return out
+
+def is_otc_pink(code, suffix=None):
+    """判断是否为美股粉单/OTC 标的（应被剔除）。
+    优先用 gtimg 交易所后缀：后缀 ∈ {OQ,O,N,A} 为正规 → 否(保留)；
+    其余(PS/OB/PK/...或拿不到后缀) → 是(剔除，保守策略)。"""
+    if suffix is None:
         return True
-    if len(t) == 5 and (t.endswith("Y") or t.endswith("F")) and t not in OTC_WHITELIST:
-        return True
-    return False
+    return suffix not in GTIMG_EXCHANGE_OK
 
 def log(*a):
     print("[pipeline]", *a, flush=True)
@@ -71,8 +99,9 @@ def get_us_codes():
         m = re.search(r'\|\s*(us[A-Za-z0-9.]+)\s*\|', l)
         if m:
             codes.add(m.group(1))
-    # 剔除粉单 / OTC 外国 ADR
-    otc = {c for c in codes if is_otc_pink(c)}
+    # 用 gtimg 拿交易所后缀，剔除 OTC/粉单（后缀非 {OQ,O,N,A} 者）
+    suf = fetch_us_suffixes(codes)
+    otc = {c for c in codes if is_otc_pink(c, suf.get(c))}
     codes = sorted(codes - otc)
     open(os.path.join(DATA_DIR, "us_codes.txt"), "w").write("\n".join(codes))
     log(f"US universe codes: {len(codes)} (剔除 OTC/粉单 {len(otc)})")
