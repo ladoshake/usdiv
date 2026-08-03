@@ -28,6 +28,50 @@ LATEST_YEAR = TODAY.year - 1   # 最近一个完整自然年（用于美股 LFY 
 FX = 7.8  # HKD per USD（联系汇率，仅说明用）
 TOP = 30
 
+# ---------------------------------------------------------------------
+# 美股 OTC / 粉单 剔除规则
+# 腾讯美股数据不暴露交易所/板块字段（market_type 对 OTC 与正规交易所均为 200），
+# 因此无法用字段自动区分。经验规律（已实测验证）：
+#   - 粉单(Pink Sheet)代码带 .PS 后缀（如 usTCEHY.PS），该段本就不在 us 过滤器宇宙内；
+#   - OTC 外国 ADR 代码以 Y 结尾（如 usTCEHY 腾讯、usIDCBY 工行、usNSRGY 雀巢）；
+#   - OTC 外国普通股代码以 F 结尾（如 usACGBF 农业银行、usIDCBF 工行、usASMLF、usBABAF）；
+#   - 但部分「正规交易所」股票也以 Y / F 结尾，必须白名单保留：
+#       Y: 礼来 LLY、施贵宝 BMY、加拿大皇家 RY、O'Reilly ORLY、西方石油 OXY、
+#          赛诺菲 SNY、索尼 SONY、纽约梅隆 BNY
+#       F: 福特 F、第一资本 COF、辛辛那提金融 CINF、地区金融 RF、Raymond James RJF、
+#          Synchrony SYF、Sun Life SLF
+# 故规则：剔除 .PS 后缀，以及以 Y/F 结尾且不在对应白名单中的代码。
+EXCHANGE_LISTED_Y = {
+    "LLY",   # 礼来 (NYSE)
+    "BMY",   # 施贵宝 (NYSE)
+    "RY",    # 加拿大皇家银行 (NYSE)
+    "ORLY",  # O'Reilly Automotive (NASDAQ)
+    "OXY",   # 西方石油 (NYSE)
+    "SNY",   # 赛诺菲 (NASDAQ ADR)
+    "SONY",  # 索尼 (NYSE)
+    "BNY",   # 纽约梅隆银行 (NYSE)
+}
+EXCHANGE_LISTED_F = {
+    "F",     # 福特汽车 (NYSE)
+    "COF",   # 第一资本信贷 (NYSE)
+    "CINF",  # 辛辛那提金融 (NASDAQ)
+    "RF",    # 地区金融 (NYSE)
+    "RJF",   # Raymond James (NYSE)
+    "SYF",   # Synchrony Financial (NYSE)
+    "SLF",   # Sun Life (NYSE)
+}
+
+def is_otc_pink(code):
+    """判断是否为美股粉单/OTC 标的（应被剔除）。code 形如 usXXXX。"""
+    t = code[2:] if code.startswith("us") else code
+    if ".PS" in t:                      # 粉单
+        return True
+    if t.endswith("Y") and t not in EXCHANGE_LISTED_Y:
+        return True
+    if t.endswith("F") and t not in EXCHANGE_LISTED_F:
+        return True
+    return False
+
 def log(*a):
     print("[pipeline]", *a, flush=True)
 
@@ -45,12 +89,14 @@ def get_us_codes():
     txt = run_filter("us", 800)
     codes = set()
     for l in txt.splitlines():
-        m = re.search(r'\|\s*(us[A-Za-z0-9]+)\s*\|', l)
+        m = re.search(r'\|\s*(us[A-Za-z0-9.]+)\s*\|', l)
         if m:
             codes.add(m.group(1))
-    codes = sorted(codes)
+    # 剔除粉单 / OTC 外国 ADR
+    otc = {c for c in codes if is_otc_pink(c)}
+    codes = sorted(codes - otc)
     open(os.path.join(DATA_DIR, "us_codes.txt"), "w").write("\n".join(codes))
-    log(f"US universe codes: {len(codes)}")
+    log(f"US universe codes: {len(codes)} (剔除 OTC/粉单 {len(otc)})")
     return codes
 
 # =====================================================================
