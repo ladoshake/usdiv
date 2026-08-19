@@ -95,9 +95,9 @@ def log(*a):
 # =====================================================================
 # 1) 代码宇宙
 # =====================================================================
-def _market_cap_num(s):
-    """把 nasdaq 的 marketCap 字符串转 float（支持 逗号/$/T/B/M 后缀）。"""
-    v = (s or "0").replace(",", "").replace("$", "").strip().upper()
+def _market_cap_num(r):
+    """把 nasdaq 行的 marketCap 字段转 float（支持 逗号/$/T/B/M 后缀）。"""
+    v = (r.get("marketCap") or "0").replace(",", "").replace("$", "").strip().upper()
     mult = 1.0
     if v.endswith("T"):
         v, mult = v[:-1], 1e12
