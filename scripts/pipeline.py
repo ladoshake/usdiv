@@ -10,13 +10,23 @@ from concurrent.futures import ThreadPoolExecutor
 
 # ---------------- 环境常量（绝对路径，避免依赖环境变量） ----------------
 NODE = "/Users/green/.workbuddy/binaries/node/versions/22.22.2/bin/node"
-DATA_JS = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-skills/westock-data/scripts/index.js"
-TOOL_JS = "/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-skills/westock-tool/scripts/index.js"
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 HTML_PATH = os.path.abspath(os.path.join(BASE, "..", "index.html"))
+
+# 代码宇宙种子池（入库，避免依赖已失效的 westock-tool）：
+#   优先读取本文件；若不存在则运行时从 nasdaq screener 拉取并回写。
+SEED_FILE = os.path.join(BASE, "us_universe_seed.txt")
+NASDAQ_URL = "https://api.nasdaq.com/api/screener/stocks?market=us&limit=800&offset=0"
+
+def _resolve_westock_bin():
+    """定位 westock-data-skillhub 的 index.js（npm 包，用于 dividend 命令）。"""
+    import glob
+    cands = sorted(glob.glob(os.path.expanduser("~/.npm/_npx/*/node_modules/westock-data-skillhub/index.js")))
+    return cands[-1] if cands else None
+WESTOCK_BIN = _resolve_westock_bin()
 
 # ---------------- 动态日期 ----------------
 TODAY = datetime.date.today()
@@ -85,24 +95,61 @@ def log(*a):
 # =====================================================================
 # 1) 代码宇宙
 # =====================================================================
-def run_filter(market, limit):
-    out = subprocess.run(
-        [NODE, TOOL_JS, "filter", "intersect([TotalMV > 0])",
-         "--market", market, "--orderby", "TotalMV", "--desc", "--limit", str(limit)],
-        capture_output=True, text=True, timeout=180)
-    return out.stdout
+def _market_cap_num(s):
+    """把 nasdaq 的 marketCap 字符串转 float（支持 逗号/$/T/B/M 后缀）。"""
+    v = (s or "0").replace(",", "").replace("$", "").strip().upper()
+    mult = 1.0
+    if v.endswith("T"):
+        v, mult = v[:-1], 1e12
+    elif v.endswith("B"):
+        v, mult = v[:-1], 1e9
+    elif v.endswith("M"):
+        v, mult = v[:-1], 1e6
+    try:
+        return float(v) * mult
+    except Exception:
+        return 0.0
+
+def fetch_nasdaq_universe():
+    """从 nasdaq screener 拉「美股市值 Top 800」作为代码宇宙种子。
+    接口按字母序分页返回全市场，本函数按 marketCap 排序取 Top 800，
+    转成 usXXXX 后回写到 SEED_FILE 供后续复用。"""
+    import json as _json
+    all_rows = []
+    for off in range(0, 8000, 800):
+        url = f"https://api.nasdaq.com/api/screener/stocks?market=us&limit=800&offset={off}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        try:
+            d = _json.loads(urllib.request.urlopen(req, timeout=30).read())
+            rows = d.get("data", {}).get("table", {}).get("rows", [])
+        except Exception as e:
+            log(f"  nasdaq page {off} error: {e}")
+            break
+        if not rows:
+            break
+        all_rows.extend(rows)
+        if len(rows) < 800:
+            break
+    all_rows.sort(key=_market_cap_num, reverse=True)
+    top = all_rows[:800]
+    codes = sorted({"us" + (r.get("symbol") or "").strip() for r in top if r.get("symbol")})
+    open(SEED_FILE, "w").write("\n".join(codes))
+    log(f"nasdaq universe fetched: {len(codes)} (已回写种子)")
+    return codes
 
 def get_us_codes():
-    txt = run_filter("us", 800)
-    codes = set()
-    for l in txt.splitlines():
-        m = re.search(r'\|\s*(us[A-Za-z0-9.]+)\s*\|', l)
-        if m:
-            codes.add(m.group(1))
+    # 优先读入库种子；缺失则运行时从 nasdaq 拉取
+    if os.path.exists(SEED_FILE) and os.path.getsize(SEED_FILE) > 0:
+        with open(SEED_FILE) as f:
+            codes = [l.strip() for l in f if l.strip()]
+        log(f"US universe (seed): {len(codes)}")
+    else:
+        codes = fetch_nasdaq_universe()
+    codes = sorted(set(codes))
     # 用 gtimg 拿交易所后缀，剔除 OTC/粉单（后缀非 {OQ,O,N,A} 者）
     suf = fetch_us_suffixes(codes)
     otc = {c for c in codes if is_otc_pink(c, suf.get(c))}
-    codes = sorted(codes - otc)
+    codes = sorted(set(codes) - otc)
     open(os.path.join(DATA_DIR, "us_codes.txt"), "w").write("\n".join(codes))
     log(f"US universe codes: {len(codes)} (剔除 OTC/粉单 {len(otc)})")
     return codes
@@ -110,62 +157,44 @@ def get_us_codes():
 # =====================================================================
 # 2) 批量行情 quote
 # =====================================================================
-def run_quote(codes):
-    out = subprocess.run([NODE, DATA_JS, "quote", ",".join(codes)],
-                         capture_output=True, text=True, timeout=120)
-    return out.stdout
-
-def parse_quotes_generic(text, market):
-    """按列名解析 quote 输出。美股 mv 单位亿美元，港股 mv 单位亿港元。"""
-    lines = text.splitlines()
-    hidx = None
-    for i, l in enumerate(lines):
-        if "code" in l and "name" in l and "total_market_cap" in l and "|" in l:
-            hidx = i
-            break
-    if hidx is None:
-        return {}
-    header = [c.strip() for c in lines[hidx].strip().strip("|").split("|")]
-    if header and header[0] == "":
-        header = header[1:]
-    idx = {h: j for j, h in enumerate(header)}
-    prefix = "us"
-    res = {}
-    p_idx, d_idx, m_idx = idx["price"], idx["dividend_ratio_ttm"], idx["total_market_cap"]
-    for l in lines[hidx + 1:]:
-        s = l.strip().strip("|").strip()
-        if not s or not s.startswith(prefix):
-            continue
-        cols = [c.strip() for c in s.split("|")]
-        if len(cols) <= m_idx:
-            continue
-        code = cols[idx["code"]]
-        if not code.startswith(prefix):
-            continue
-        def num(x):
-            try:
-                return float(x) if x not in ("", "-") else None
-            except:
-                return None
-        res[code] = {
-            "code": code, "name": cols[idx["name"]],
-            "price": num(cols[p_idx]), "ttm_yield": num(cols[d_idx]), "mv": num(cols[m_idx]),
-        }
-    return res
-
-def fetch_quotes(codes, market):
+def fetch_us_quotes_gtimg(codes):
+    """批量调腾讯 gtimg 行情接口，取现价 / 总市值 / TTM 股息率。
+    字段：f[3]=现价, f[45]=总市值(亿美元), f[52]=TTM股息率(%)。
+    返回 {code: {code,name,price,ttm_yield,mv}}。"""
     out = {}
-    for i in range(0, len(codes), 50):
-        batch = codes[i:i + 50]
+    codes = list(codes)
+    for i in range(0, len(codes), 60):
+        batch = codes[i:i + 60]
+        url = "https://qt.gtimg.cn/q=" + ",".join(batch)
         try:
-            txt = run_quote(batch)
-            parsed = parse_quotes_generic(txt, market)
-            out.update(parsed)
+            raw = urllib.request.urlopen(url, timeout=20).read()
+            data = raw.decode("gbk", "ignore")
         except Exception as e:
-            log(f"  quote batch {i} error: {e}")
-        if i % 200 == 0:
-            log(f"  quote {min(i+50,len(codes))}/{len(codes)} parsed={len(out)}")
-    log(f"{market} quotes parsed: {len(out)}")
+            log(f"  gtimg quote batch {i} error: {e}")
+            continue
+        for line in data.split(";"):
+            line = line.strip()
+            if "~" not in line:
+                continue
+            p = line.split("~")
+            m = re.search(r'(us[A-Za-z0-9.]+)', p[0])
+            if not m:
+                continue
+            code = m.group(1)
+            def num(x):
+                try:
+                    return float(x) if x not in ("", "-") else None
+                except Exception:
+                    return None
+            out[code] = {
+                "code": code,
+                "name": p[1] if len(p) > 1 else code,
+                "price": num(p[3]) if len(p) > 3 else None,
+                "ttm_yield": num(p[52]) if len(p) > 52 else None,
+                "mv": num(p[45]) if len(p) > 45 else None,  # 亿美元
+            }
+        log(f"  gtimg quote {min(i+60,len(codes))}/{len(codes)} parsed={len(out)}")
+    log(f"us quotes parsed: {len(out)}")
     return out
 
 # =====================================================================
@@ -181,10 +210,13 @@ def parse_date(s):
         return None
 
 def run_div(code, retries=3):
+    if WESTOCK_BIN:
+        cmd = [NODE, WESTOCK_BIN, "dividend", "list", code, "--years", "5"]
+    else:
+        cmd = ["npx", "-y", "westock-data-skillhub@1.0.5", "dividend", "list", code, "--years", "5"]
     for _ in range(retries):
         try:
-            out = subprocess.run([NODE, DATA_JS, "dividend", "list", code, "--years", "5"],
-                                 capture_output=True, text=True, timeout=60).stdout
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
             if "暂无分红数据" in out or "暂无" in out:
                 return None
             if "reportEndDate" in out or "exDivDate" in out:
@@ -640,7 +672,7 @@ def main():
     us_codes = get_us_codes()
 
     log("[2/4] US quotes")
-    us_quotes = fetch_quotes(us_codes, "us")
+    us_quotes = fetch_us_quotes_gtimg(us_codes)
     us_recs = [us_quotes[c] for c in us_codes if c in us_quotes]
 
     # 美股：过滤普通股 / 分桶（>1000亿 或 500-1000亿美元，单位亿美元）
