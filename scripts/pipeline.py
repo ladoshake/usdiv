@@ -686,6 +686,9 @@ def main():
 
     log("[2/4] US quotes")
     us_quotes = fetch_us_quotes_gtimg(us_codes)
+    if not us_quotes:
+        log("FATAL: 行情层 0 只解析（疑似 gtimg 不可达），终止运行以免写出空表")
+        sys.exit(2)
     us_recs = [us_quotes[c] for c in us_codes if c in us_quotes]
 
     # 美股：过滤普通股 / 分桶（>1000亿 或 500-1000亿美元，单位亿美元）
@@ -702,6 +705,18 @@ def main():
 
     log("[3/4] US dividend history")
     us_enriched = fetch_us_div(us_bucketed)
+
+    # 防御性校验：分红层若系统性失效（如 node 路径失效导致全部取数失败），
+    # 会静默产生「分红字段全空」的榜单。此处强制拦截，避免覆盖正常历史数据。
+    total = len(us_enriched)
+    with_div = sum(1 for x in us_enriched if x["has_div"])
+    if total == 0:
+        log("FATAL: 0 只股票进入分红层，疑似取数全失败，终止运行")
+        sys.exit(2)
+    if with_div / total < 0.5:
+        log(f"FATAL: 有分红占比 {with_div}/{total}={with_div/total:.0%} 过低，疑似分红接口失效，"
+            f"终止运行（正常值约 85%）")
+        sys.exit(2)
 
     log("[4/4] build HTML")
     build_html([sanitize(d) for d in us_enriched])
