@@ -8,8 +8,20 @@
 import subprocess, json, re, os, sys, time, datetime, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-# ---------------- 环境常量（绝对路径，避免依赖环境变量） ----------------
-NODE = "/Users/green/.workbuddy/binaries/node/versions/22.22.2/bin/node"
+# ---------------- 环境常量（动态解析，避免运行时升级后路径失效） ----------------
+def _resolve_node():
+    """动态定位 node 可执行文件。
+    优先取 PATH 上的 node（与 shell `which node` 一致）；
+    否则回退到 WorkBuddy 托管版本目录（路径中的小版本号可能随升级变化，
+    如 22.22.2 -> 22.22.2-2，故用 glob 而非硬编码）。"""
+    import shutil, glob
+    p = shutil.which("node")
+    if p:
+        return p
+    cands = sorted(glob.glob(os.path.expanduser(
+        "/Users/green/.workbuddy/binaries/node/versions/*/bin/node")))
+    return cands[-1] if cands else None
+NODE = _resolve_node()
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE, "data")
@@ -210,7 +222,8 @@ def parse_date(s):
         return None
 
 def run_div(code, retries=3):
-    if WESTOCK_BIN:
+    # 优先用缓存的 westock bin；若 WESTOCK_BIN 或 NODE 任一缺失，回退 npx（由 npx 自行解析 node）
+    if WESTOCK_BIN and NODE:
         cmd = [NODE, WESTOCK_BIN, "dividend", "list", code, "--years", "5"]
     else:
         cmd = ["npx", "-y", "westock-data-skillhub@1.0.5", "dividend", "list", code, "--years", "5"]
